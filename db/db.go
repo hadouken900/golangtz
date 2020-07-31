@@ -8,28 +8,16 @@ import (
 	"log"
 )
 
-func GetDBCollection() (*mongo.Collection, error) {
+func GetDBCollectionAndBase(ctx context.Context) (*mongo.Collection, *mongo.Database, error) {
 
-	// Create client
-	client, err := mongo.NewClient(options.Client().ApplyURI("mongodb://127.0.0.1:27017"))
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err.Error())
 	}
 
-	// Create connect
-	err = client.Connect(context.TODO())
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Check the connection
-	err = client.Ping(context.TODO(), nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	collection := client.Database("test").Collection("users")
+	db := client.Database("test")
+	col := db.Collection("users")
 
 	fmt.Println("Connected to MongoDB!")
-	return collection, nil
+	return col, db, nil
 }

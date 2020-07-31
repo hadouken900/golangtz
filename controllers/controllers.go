@@ -6,6 +6,7 @@ import (
 	jwtmiddleware "github.com/auth0/go-jwt-middleware"
 	"github.com/dgrijalva/jwt-go"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 	"io"
 	"medods/db"
@@ -48,27 +49,56 @@ var GetTokens = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		TokenID:      currTime,
 	}
 
-	db, _ := db.GetDBCollection()
+	ctx := context.Background()
+
+	col, base, _ := db.GetDBCollectionAndBase(ctx)
+	defer base.Client().Disconnect(ctx)
 	var res model.User
-	err = db.FindOne(context.TODO(), bson.D{{"guid", user.GUID}}).Decode(&res)
-	if err != nil {
-		if err.Error() == "mongo: no documents in result" {
-			db.InsertOne(context.TODO(), user)
-			io.WriteString(w, `create new user : `+user.GUID)
 
-		} else {
-
-			io.WriteString(w, err.Error())
+	//starting tx
+	err = base.Client().UseSession(ctx, func(sessionContext mongo.SessionContext) error {
+		err := sessionContext.StartTransaction()
+		if err != nil {
+			fmt.Println(err)
+			return err
 		}
 
-	} else {
-		db.InsertOne(context.TODO(), user)
-		io.WriteString(w, `add new refresh token to : `+user.GUID)
-	}
+		err = col.FindOne(context.TODO(), bson.D{{"guid", user.GUID}}).Decode(&res)
+		if err != nil {
+			if err.Error() == "mongo: no documents in result" {
+				_, err := col.InsertOne(context.TODO(), user)
 
-	io.WriteString(w, `{"access token":"`+accessTokenString+`"}`+"\n")
-	io.WriteString(w, `{"refresh token":"`+refreshTokenString+`"}`)
+				if err != nil {
+					sessionContext.AbortTransaction(sessionContext)
+					io.WriteString(w, "tx aborted")
+				}
 
+				io.WriteString(w, `create new user : `+user.GUID)
+
+				io.WriteString(w, `{"access token":"`+accessTokenString+`"}`+"\n")
+				io.WriteString(w, `{"refresh token":"`+refreshTokenString+`"}`)
+				sessionContext.CommitTransaction(sessionContext)
+				fmt.Println("Tx completed")
+				return nil
+
+			}
+
+		} else {
+			_, err := col.InsertOne(context.TODO(), user)
+			if err != nil {
+				sessionContext.AbortTransaction(sessionContext)
+				io.WriteString(w, "tx aborted")
+			}
+			io.WriteString(w, `add new refresh token to : `+user.GUID)
+
+			io.WriteString(w, `{"access token":"`+accessTokenString+`"}`+"\n")
+			io.WriteString(w, `{"refresh token":"`+refreshTokenString+`"}`)
+			sessionContext.CommitTransaction(sessionContext)
+			fmt.Println("tx completed")
+			return nil
+		}
+		return nil
+	})
 })
 
 var Refresh = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,46 +124,60 @@ var Refresh = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	if claimsAcc["tid"] == claimsRef["tid"] && claimsAcc["guid"] == claimsRef["guid"] && acceptToken.Valid && refreshToken.Valid {
 		guid := fmt.Sprintf("%v", claimsRef["guid"])
 		currTime := time.Now().String()
+		ctx := context.Background()
 
-		db, _ := db.GetDBCollection()
+		col, base, _ := db.GetDBCollectionAndBase(ctx)
+		defer base.Client().Disconnect(ctx)
+
 		var res model.User
-		db.FindOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}}).Decode(&res)
-		err = bcrypt.CompareHashAndPassword([]byte(res.RefreshToken), []byte(refreshTokenString))
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"error":"bad refresh token"}`)
-			return
-		}
-		db.DeleteOne(context.TODO(), bson.D{{"tokenid", res.TokenID}})
 
-		accessTokenString, _ := tokens.CreateNewAccessToken(&guid, &currTime)
-		refreshTokenString, _ := tokens.CreateNewRefreshToken(&guid, &currTime)
+		err = base.Client().UseSession(ctx, func(sessionContext mongo.SessionContext) error {
+			err := sessionContext.StartTransaction()
+			if err != nil {
+				fmt.Println(err)
+				return err
+			}
 
-		user := model.User{
-			GUID:         guid,
-			TokenID:      currTime,
-			RefreshToken: refreshTokenString,
-		}
+			col.FindOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}}).Decode(&res)
+			err = bcrypt.CompareHashAndPassword([]byte(res.RefreshToken), []byte(refreshTokenString))
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"error":"bad refresh token"}`)
+				return nil
+			}
+			_, err = col.DeleteOne(context.TODO(), bson.D{{"tokenid", res.TokenID}})
+			if err != nil {
+				sessionContext.AbortTransaction(sessionContext)
+				io.WriteString(w, "tx aborted")
+			}
+			accessTokenString, _ := tokens.CreateNewAccessToken(&guid, &currTime)
+			refreshTokenString, _ := tokens.CreateNewRefreshToken(&guid, &currTime)
 
-		db.InsertOne(context.TODO(), user)
+			hash, _ := bcrypt.GenerateFromPassword([]byte(refreshTokenString), 5)
 
-		io.WriteString(w, `{"access token":"`+accessTokenString+`"}`+"\n")
-		io.WriteString(w, `{"refresh token":"`+refreshTokenString+`"}`)
+			fmt.Println("create new hash :")
+			fmt.Println(string(hash))
 
-		return
+			user := model.User{
+				GUID:         guid,
+				TokenID:      currTime,
+				RefreshToken: string(hash),
+			}
+
+			_, err = col.InsertOne(context.TODO(), user)
+			if err != nil {
+				sessionContext.AbortTransaction(sessionContext)
+				io.WriteString(w, "tx aborted")
+			}
+
+			io.WriteString(w, `{"access token":"`+accessTokenString+`"}`+"\n")
+			io.WriteString(w, `{"refresh token":"`+refreshTokenString+`"}`)
+			sessionContext.CommitTransaction(sessionContext)
+			return nil
+		})
 	} else {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Println("invalid tokens")
-
-		for key, val := range claimsAcc {
-
-			fmt.Printf("Key: %v, value: %v\n", key, val)
-		}
-		fmt.Println()
-		for key, val := range claimsRef {
-
-			fmt.Printf("Key: %v, value: %v\n", key, val)
-		}
+		io.WriteString(w, "bad pair of tokens")
 	}
 
 })
@@ -149,28 +193,48 @@ var DeleteOne = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 	refreshTokenString := r.URL.Query().Get("ref")
 	claimsRef := jwt.MapClaims{}
-	refreshToken, err := jwt.ParseWithClaims(refreshTokenString, claimsRef, func(token *jwt.Token) (interface{}, error) {
+	_, err := jwt.ParseWithClaims(refreshTokenString, claimsRef, func(token *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	})
-
-	db, _ := db.GetDBCollection()
-	var res model.User
-	db.FindOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}}).Decode(&res)
-	fmt.Println(res.RefreshToken)
-	fmt.Println(refreshTokenString)
-	fmt.Println(res.TokenID)
-	fmt.Println(claimsRef["tid"])
-	fmt.Println(res.GUID)
-
-	err = bcrypt.CompareHashAndPassword([]byte(res.RefreshToken), []byte(refreshToken.Raw))
-
-	if err == nil && token.Valid && claimsAcc["guid"] == claimsRef["guid"] {
-		db.DeleteOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}})
-		io.WriteString(w, "refresh token was deleted")
-	} else {
-		io.WriteString(w, "you are not allowed to do this operation")
+	if err != nil {
+		io.WriteString(w, "bad refresh token")
 	}
 
+	ctx := context.Background()
+	col, base, _ := db.GetDBCollectionAndBase(ctx)
+	defer base.Client().Disconnect(ctx)
+	var res model.User
+
+	err = base.Client().UseSession(ctx, func(sessionContext mongo.SessionContext) error {
+		err := sessionContext.StartTransaction()
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+		col.FindOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}}).Decode(&res)
+
+		err = bcrypt.CompareHashAndPassword([]byte(res.RefreshToken), []byte(refreshTokenString))
+
+		if err == nil && token.Valid && claimsAcc["guid"] == claimsRef["guid"] {
+			_, err = col.DeleteOne(context.TODO(), bson.D{{"tokenid", claimsRef["tid"]}})
+			if err != nil {
+				sessionContext.AbortTransaction(sessionContext)
+				io.WriteString(w, "tx aborted")
+			}
+			sessionContext.CommitTransaction(sessionContext)
+			io.WriteString(w, "refresh token was deleted")
+			return nil
+		} else {
+			io.WriteString(w, "you are not allowed to do this operation")
+			fmt.Printf("%v", claimsRef["guid"])
+			fmt.Printf("%v", claimsAcc["guid"])
+			fmt.Println(err.Error())
+			fmt.Println(res.RefreshToken)
+			fmt.Println(refreshTokenString)
+
+			return nil
+		}
+	})
 })
 
 var DeleteAll = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -180,21 +244,37 @@ var DeleteAll = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 	accToken, _ := jwtmiddleware.FromAuthHeader(r)
 	claimsAcc := jwt.MapClaims{}
-	token, _ := jwt.ParseWithClaims(accToken, claimsAcc, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(accToken, claimsAcc, func(token *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	})
+	if err != nil {
+		io.WriteString(w, "bad accept token")
+	}
 
 	if claimsAcc["guid"] == guid && token.Valid {
-		db, _ := db.GetDBCollection()
-		_, err := db.DeleteMany(context.TODO(), bson.D{{"guid", guid}})
 
-		if err != nil {
-			io.WriteString(w, err.Error())
-			return
-		}
+		ctx := context.Background()
+		col, base, _ := db.GetDBCollectionAndBase(ctx)
+		defer base.Client().Disconnect(ctx)
 
-		io.WriteString(w, "refresh tokens of guid : "+guid+" was deleted")
+		err = base.Client().UseSession(ctx, func(sessionContext mongo.SessionContext) error {
+			err := sessionContext.StartTransaction()
+			if err != nil {
+				fmt.Println(err)
+				return err
+			}
+			_, err = col.DeleteMany(context.TODO(), bson.D{{"guid", guid}})
+			if err != nil {
+				sessionContext.AbortTransaction(sessionContext)
+				io.WriteString(w, "tx aborted")
 
+			}
+
+			sessionContext.CommitTransaction(sessionContext)
+			io.WriteString(w, "refresh tokens of guid : "+guid+" was deleted")
+			return nil
+
+		})
 	} else {
 		io.WriteString(w, "you are not allowed to do this operation")
 	}

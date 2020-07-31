@@ -44,8 +44,6 @@ func main() {
 	r.Handle("/delete-one", NotImplemented).Methods("GET")
 	r.Handle("/delete-all", NotImplemented).Methods("GET")
 
-	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))
-
 	http.ListenAndServe(":8080", r)
 
 }

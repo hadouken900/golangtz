@@ -10,7 +10,7 @@ import (
 
 func GetDBCollectionAndBase(ctx context.Context) (*mongo.Collection, *mongo.Database, error) {
 
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb+srv://herokuapp:simplepass@mongocluster.kd0gh.mongodb.net/users?retryWrites=true&w=majority"))
 	if err != nil {
 		log.Fatal(err.Error())
 	}

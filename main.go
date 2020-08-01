@@ -17,7 +17,7 @@ func main() {
 
 	r := mux.NewRouter()
 
-	r.Handle("/", AuthMiddleware(http.FileServer(http.Dir("./views"))))
+	r.Handle("/", http.FileServer(http.Dir("./views")))
 
 	r.Handle("/get-tokens", controllers.GetTokens).Methods("GET")
 	r.Handle("/refresh", AuthMiddleware(controllers.Refresh)).Methods("GET")

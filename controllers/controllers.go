@@ -27,6 +27,7 @@ var GetTokens = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	if guid == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, `{"error":"invalid_guid"}`)
+		io.WriteString(w, "example : ?guid=")
 		return
 	}
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"os"
 
 	"medods/controllers"
 
@@ -23,7 +24,12 @@ func main() {
 	r.Handle("/delete-one", AuthMiddleware(controllers.DeleteOne)).Methods("DELETE")
 	r.Handle("/delete-all", AuthMiddleware(controllers.DeleteAll)).Methods("DELETE")
 
-	http.ListenAndServe(":8080", r)
+
+	port , err:= os.LookupEnv("PORT")
+	if err == false {
+		port = "5000"
+	}
+	http.ListenAndServe(":"+port, r)
 
 }
 
